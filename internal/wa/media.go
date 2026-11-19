@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"go.mau.fi/whatsmeow"
+
+	"github.com/thenavidm/whatsapp-mcp/internal/store"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
@@ -163,6 +165,24 @@ func (c *Client) SendFile(ctx context.Context, chatJID, path, caption string) (s
 	resp, err := c.wm.SendMessage(ctx, jid, msg)
 	if err != nil {
 		return "", err
+	}
+
+	// WhatsApp does not echo our own sends back to this device, so record the
+	// message now or it never shows up in list_messages or download_media.
+	sm := store.StoredMessage{Message: store.Message{
+		ID:        resp.ID,
+		ChatJID:   jid.ToNonAD().String(),
+		SenderJID: c.wm.Store.GetJID().ToNonAD().String(),
+		Content:   ExtractText(msg),
+		Timestamp: resp.Timestamp,
+		IsFromMe:  true,
+		MsgType:   messageType(msg),
+	}}
+	fillMedia(&sm, msg)
+	if err := c.st.UpsertMessage(ctx, sm); err == nil {
+		if abs, err := filepath.Abs(path); err == nil {
+			_ = c.st.SetMediaPath(ctx, sm.ChatJID, resp.ID, abs)
+		}
 	}
 	return resp.ID, nil
 }
