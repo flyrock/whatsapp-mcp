@@ -247,6 +247,13 @@ func run() error {
 	}
 
 	if command == "login" {
+		// Give the first app-state and history sync time to land before
+		// disconnecting; exiting at once leaves contacts and names half synced.
+		fmt.Fprintln(os.Stderr, "Linked. Letting the first sync finish (45s)...")
+		select {
+		case <-ctx.Done():
+		case <-time.After(45 * time.Second):
+		}
 		fmt.Fprintln(os.Stderr, "Linked. You can now add this server to your AI client.")
 		return nil
 	}
