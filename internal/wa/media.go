@@ -48,7 +48,14 @@ func (d *mediaDownloadable) GetMediaType() whatsmeow.MediaType { return d.mediaT
 func (c *Client) DownloadMedia(ctx context.Context, chatJID, messageID string) (string, error) {
 	m, err := c.st.GetMedia(ctx, chatJID, messageID)
 	if err != nil {
-		return "", err
+		// A chat can be stored under a LID as well as a phone number (your
+		// own "Message yourself" chat is the usual case), so the caller may
+		// pass the other alias. Message ids are unique enough to fall back on.
+		alt, altChat, err2 := c.st.GetMediaByID(ctx, messageID)
+		if err2 != nil {
+			return "", err
+		}
+		m, chatJID = alt, altChat
 	}
 	if m.MediaType == "" {
 		return "", fmt.Errorf("message %s has no attachment", messageID)

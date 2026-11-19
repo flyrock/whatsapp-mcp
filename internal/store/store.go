@@ -418,6 +418,23 @@ func (s *Store) GetMedia(ctx context.Context, chatJID, messageID string) (Media,
 	return m, err
 }
 
+// GetMediaByID finds an attachment by message id alone, newest first, for
+// when the caller used a different alias of the same chat.
+func (s *Store) GetMediaByID(ctx context.Context, messageID string) (Media, string, error) {
+	var m Media
+	var chat string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT chat_jid, media_type, media_url, media_key, file_sha256, file_enc_sha256,
+		       file_length, filename, media_path
+		FROM messages WHERE id = ? AND media_type != '' ORDER BY timestamp DESC LIMIT 1`, messageID).
+		Scan(&chat, &m.MediaType, &m.MediaURL, &m.MediaKey, &m.FileSHA256, &m.FileEncSHA,
+			&m.FileLength, &m.Filename, &m.MediaPath)
+	if err == sql.ErrNoRows {
+		return m, "", fmt.Errorf("no message %s", messageID)
+	}
+	return m, chat, err
+}
+
 // SetMediaPath records where a downloaded attachment landed, so a second
 // request returns the existing file instead of downloading it again.
 func (s *Store) SetMediaPath(ctx context.Context, chatJID, messageID, path string) error {

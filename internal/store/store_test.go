@@ -266,3 +266,22 @@ func TestOwnNameNeverOverwritesAChatName(t *testing.T) {
 		t.Fatalf("a reply renamed the chat: %+v", got)
 	}
 }
+
+func TestGetMediaByIDFindsOtherChatAlias(t *testing.T) {
+	s := newTestStore(t)
+	m := msg("ABC", "111@lid", "", time.Now())
+	m.MediaType, m.MediaURL = "image", "https://mmg.whatsapp.net/v/x.enc?ccb=1"
+	seed(t, s, m)
+
+	ctx := context.Background()
+	if _, err := s.GetMedia(ctx, "222@s.whatsapp.net", "ABC"); err == nil {
+		t.Fatal("expected no row under the other alias")
+	}
+	got, chat, err := s.GetMediaByID(ctx, "ABC")
+	if err != nil {
+		t.Fatalf("GetMediaByID: %v", err)
+	}
+	if chat != "111@lid" || got.MediaType != "image" {
+		t.Fatalf("got chat %q type %q", chat, got.MediaType)
+	}
+}
