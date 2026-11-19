@@ -14,6 +14,7 @@ import (
 
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	waStore "go.mau.fi/whatsmeow/store"
@@ -284,6 +285,14 @@ func (c *Client) handleEvent(evt any) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
+			// A pairing whose first app-state fetch failed (for example on
+			// SQLITE_BUSY) is never retried by whatsmeow. Fetch any collection
+			// that has no stored version yet; synced ones are skipped.
+			for _, name := range appstate.AllPatchNames {
+				if err := c.wm.FetchAppState(ctx, name, true, true); err != nil {
+					fmt.Fprintf(c.out, "App state %s fetch failed: %v\n", name, err)
+				}
+			}
 			if n, err := c.SyncContacts(ctx); err == nil && n > 0 {
 				fmt.Fprintf(c.out, "Synced %d contacts.\n", n)
 			}
