@@ -148,8 +148,13 @@ func New(ctx context.Context, opts Options) (*Client, error) {
 
 	// The session database holds the linked device's Signal keys. It is
 	// credentials, so it lives 0700 alongside the message store.
+	//
+	// whatsmeow writes to it from several goroutines at once, most heavily
+	// during the first app-state sync after pairing. Without a busy timeout
+	// those writes fail with SQLITE_BUSY instead of waiting their turn, and
+	// WAL lets reads proceed alongside a writer.
 	sessionPath := filepath.Join(opts.DataDir, "session.db")
-	container, err := sqlstore.New(ctx, "sqlite", "file:"+sessionPath+"?_pragma=foreign_keys(1)", logger)
+	container, err := sqlstore.New(ctx, "sqlite", "file:"+sessionPath+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)", logger)
 	if err != nil {
 		return nil, fmt.Errorf("open session store: %w", err)
 	}
