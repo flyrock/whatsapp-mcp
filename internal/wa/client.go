@@ -558,6 +558,7 @@ func payloadName(msg *waE2E.Message) string {
 }
 
 func messageType(msg *waE2E.Message) string {
+	msg = unwrapMessage(msg)
 	switch {
 	case msg.GetImageMessage() != nil:
 		return "image"
@@ -582,6 +583,19 @@ func messageType(msg *waE2E.Message) string {
 // fillMedia records what is needed to fetch an attachment later, without
 // downloading it now.
 func fillMedia(sm *store.StoredMessage, msg *waE2E.Message) {
+	// History sync does not unwrap containers the way live events do, so a
+	// photo sent from your own phone (device-sent), a disappearing-chat photo
+	// or a view-once photo would otherwise be stored without its media fields.
+	msg = unwrapMessage(msg)
+	defer func() {
+		// Messages sent from your own phone often carry only a direct path
+		// and no URL. Keep the path in media_url so download can find it.
+		if sm.MediaType != "" && sm.MediaURL == "" {
+			if dp := mediaDirectPath(msg); dp != "" {
+				sm.MediaURL = "https://mmg.whatsapp.net" + dp
+			}
+		}
+	}()
 	switch {
 	case msg.GetImageMessage() != nil:
 		m := msg.GetImageMessage()
@@ -841,4 +855,45 @@ func (c *Client) autoReplyWith(chatJID, text string, spoken bool) {
 	if _, err := c.SendText(ctx, chatJID, reply); err != nil {
 		fmt.Fprintf(c.out, "auto-reply could not send: %v\n", err)
 	}
+}
+
+// unwrapMessage peels off the container messages WhatsApp wraps real content
+// in (sent from your own phone, disappearing chats, view once, captioned
+// documents, edits) so media fields are found at any depth.
+func unwrapMessage(msg *waE2E.Message) *waE2E.Message {
+	for i := 0; i < 5 && msg != nil; i++ {
+		switch {
+		case msg.GetDeviceSentMessage().GetMessage() != nil:
+			msg = msg.GetDeviceSentMessage().GetMessage()
+		case msg.GetEphemeralMessage().GetMessage() != nil:
+			msg = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetViewOnceMessage().GetMessage() != nil:
+			msg = msg.GetViewOnceMessage().GetMessage()
+		case msg.GetViewOnceMessageV2().GetMessage() != nil:
+			msg = msg.GetViewOnceMessageV2().GetMessage()
+		case msg.GetViewOnceMessageV2Extension().GetMessage() != nil:
+			msg = msg.GetViewOnceMessageV2Extension().GetMessage()
+		case msg.GetDocumentWithCaptionMessage().GetMessage() != nil:
+			msg = msg.GetDocumentWithCaptionMessage().GetMessage()
+		case msg.GetEditedMessage().GetMessage() != nil:
+			msg = msg.GetEditedMessage().GetMessage()
+		default:
+			return msg
+		}
+	}
+	return msg
+}
+
+func mediaDirectPath(msg *waE2E.Message) string {
+	switch {
+	case msg.GetImageMessage() != nil:
+		return msg.GetImageMessage().GetDirectPath()
+	case msg.GetVideoMessage() != nil:
+		return msg.GetVideoMessage().GetDirectPath()
+	case msg.GetAudioMessage() != nil:
+		return msg.GetAudioMessage().GetDirectPath()
+	case msg.GetDocumentMessage() != nil:
+		return msg.GetDocumentMessage().GetDirectPath()
+	}
+	return ""
 }
