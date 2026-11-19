@@ -35,6 +35,10 @@ func (d *mediaDownloadable) GetFileSHA256() []byte    { return d.fileSHA }
 func (d *mediaDownloadable) GetFileEncSHA256() []byte { return d.fileEncSHA }
 func (d *mediaDownloadable) GetFileLength() uint64    { return d.fileLength }
 
+// GetMediaType satisfies whatsmeow.MediaTypeable. Without it whatsmeow cannot
+// tell which keys to derive and fails with "unknown media type".
+func (d *mediaDownloadable) GetMediaType() whatsmeow.MediaType { return d.mediaType }
+
 // DownloadMedia fetches and decrypts an attachment, writes it into the data
 // directory and returns the path.
 //
@@ -230,14 +234,19 @@ func (c *Client) SendVoiceNote(ctx context.Context, chatJID, path string) (strin
 
 // directPath strips the CDN host off a stored media URL, because whatsmeow
 // wants the path portion rather than the full URL.
+//
+// The query string (ccb, oh, oe) is part of the direct path and must be kept:
+// the CDN rejects the request with 403 without it, and whatsmeow appends
+// "&hash=..." on the assumption that a query is already present.
 func directPath(url string) string {
+	p := url
 	if i := strings.Index(url, ".net/"); i != -1 {
-		if q := strings.Index(url[i+4:], "?"); q != -1 {
-			return url[i+4 : i+4+q]
-		}
-		return url[i+4:]
+		p = url[i+4:]
 	}
-	return url
+	if p != "" && !strings.Contains(p, "?") {
+		p += "?"
+	}
+	return p
 }
 
 func kindFor(path string) (string, whatsmeow.MediaType) {
