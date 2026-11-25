@@ -136,6 +136,7 @@ func (s *Store) UpsertMessage(ctx context.Context, m StoredMessage) error {
 		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(chat_jid, id) DO UPDATE SET
 			content    = CASE WHEN excluded.content    <> '' THEN excluded.content    ELSE messages.content    END,
+			quoted_id  = CASE WHEN excluded.quoted_id  <> '' THEN excluded.quoted_id  ELSE messages.quoted_id  END,
 			media_path = CASE WHEN excluded.media_path <> '' THEN excluded.media_path ELSE messages.media_path END,
 			transcript = CASE WHEN excluded.transcript <> '' THEN excluded.transcript ELSE messages.transcript END`,
 		m.ID, m.ChatJID, m.SenderJID, m.Content, m.Timestamp.Unix(), m.IsFromMe,
@@ -401,6 +402,23 @@ type Media struct {
 	FileLength uint64
 	Filename   string
 	MediaPath  string
+}
+
+// GetMessage returns a single non-deleted message by chat and ID.
+func (s *Store) GetMessage(ctx context.Context, chatJID, messageID string) (Message, error) {
+	q := selectMessage + ` WHERE m.chat_jid = ? AND m.id = ? AND m.deleted = 0`
+	rows, err := s.db.QueryContext(ctx, q, chatJID, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	msgs, err := scanMessages(rows)
+	if err != nil {
+		return Message{}, err
+	}
+	if len(msgs) == 0 {
+		return Message{}, fmt.Errorf("no message %s in chat %s", messageID, chatJID)
+	}
+	return msgs[0], nil
 }
 
 // GetMedia returns the attachment metadata stored with a message.

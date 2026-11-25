@@ -28,6 +28,11 @@ func (f *fakeWA) SendText(_ context.Context, chatJID, text string) (string, erro
 	return "MSGID1", nil
 }
 
+func (f *fakeWA) SendReply(_ context.Context, chatJID, text, quotedMessageID string) (string, error) {
+	f.sent = append(f.sent, chatJID+" [reply:"+quotedMessageID+"]: "+text)
+	return "MSGID_REPLY", nil
+}
+
 func (f *fakeWA) DownloadMedia(_ context.Context, chatJID, messageID string) (string, error) {
 	return "/tmp/" + messageID + ".jpg", nil
 }
@@ -329,5 +334,51 @@ func TestSendAudioRejectsBadBase64(t *testing.T) {
 	})
 	if !res.IsError {
 		t.Fatal("invalid base64 should be an error, not a silent failure")
+	}
+}
+
+func TestSendQuotedReplyGuardsAndPreview(t *testing.T) {
+	// Refused without --allow-send even with quoted_message_id.
+	csReadOnly, fakeRO, stRO := session(t, false)
+	_ = stRO.UpsertMessage(context.Background(), store.StoredMessage{Message: store.Message{
+		ID: "Q1", ChatJID: "a@s.whatsapp.net", Content: "hi", Timestamp: time.Now(), MsgType: "text",
+	}})
+	res := call(t, csReadOnly, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net", "text": "reply", "quoted_message_id": "Q1", "confirm": true,
+	})
+	if !res.IsError || len(fakeRO.sent) != 0 {
+		t.Fatal("quoted reply must be refused when --allow-send is off")
+	}
+
+	cs, fake, st := session(t, true)
+	_ = st.UpsertMessage(context.Background(), store.StoredMessage{Message: store.Message{
+		ID: "Q1", ChatJID: "a@s.whatsapp.net", Content: "original", Timestamp: time.Now(), MsgType: "text",
+	}})
+
+	// Unknown quoted_message_id errors cleanly.
+	res = call(t, cs, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net", "text": "reply", "quoted_message_id": "MISSING", "confirm": true,
+	})
+	if !res.IsError || len(fake.sent) != 0 {
+		t.Fatal("missing quoted message should return an error")
+	}
+
+	// Preview does not send.
+	res = call(t, cs, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net", "text": "reply", "quoted_message_id": "Q1",
+	})
+	if res.IsError || len(fake.sent) != 0 {
+		t.Fatal("preview of quoted reply should not send")
+	}
+
+	// Confirmed quoted reply calls SendReply.
+	res = call(t, cs, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net", "text": "reply", "quoted_message_id": "Q1", "confirm": true,
+	})
+	if res.IsError {
+		t.Fatal("confirmed quoted reply should succeed")
+	}
+	if len(fake.sent) != 1 || fake.sent[0] != "a@s.whatsapp.net [reply:Q1]: reply" {
+		t.Fatalf("unexpected sent record: %v", fake.sent)
 	}
 }

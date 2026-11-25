@@ -266,3 +266,31 @@ func TestOwnNameNeverOverwritesAChatName(t *testing.T) {
 		t.Fatalf("a reply renamed the chat: %+v", got)
 	}
 }
+
+func TestGetMessageAndQuotedIDPreserved(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	orig := msg("M1", "a@s.whatsapp.net", "hello", now)
+	orig.SenderJID = "a@s.whatsapp.net"
+	seed(t, s, orig)
+
+	reply := msg("M2", "a@s.whatsapp.net", "replying", now.Add(time.Second))
+	reply.QuotedID = "M1"
+	seed(t, s, reply)
+
+	// Re-delivering M2 without quoted_id must not wipe the existing quoted_id.
+	seed(t, s, msg("M2", "a@s.whatsapp.net", "replying", now.Add(time.Second)))
+
+	got, err := s.GetMessage(ctx, "a@s.whatsapp.net", "M2")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.QuotedID != "M1" {
+		t.Fatalf("want quoted_id M1, got %q", got.QuotedID)
+	}
+	if _, err := s.GetMessage(ctx, "other@s.whatsapp.net", "M1"); err == nil {
+		t.Fatal("expected error when querying message from another chat")
+	}
+}

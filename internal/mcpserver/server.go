@@ -35,6 +35,7 @@ var Version = "dev"
 type WhatsApp interface {
 	Status() wa.Status
 	SendText(ctx context.Context, chatJID, text string) (string, error)
+	SendReply(ctx context.Context, chatJID, text, quotedMessageID string) (string, error)
 	DownloadMedia(ctx context.Context, chatJID, messageID string) (string, error)
 	SendVoiceBytes(ctx context.Context, chatJID string, ogg []byte) (string, error)
 	SendAudioBytes(ctx context.Context, chatJID string, data []byte, filename string) (string, error)
@@ -248,17 +249,19 @@ func registerSessionStatus(s *mcp.Server, d Deps) {
 // ── Writes ──
 
 type sendMessageIn struct {
-	ChatJID string `json:"chat_jid" jsonschema:"The chat to send to. Get it from list_chats or search_contacts"`
-	Text    string `json:"text" jsonschema:"The message to send"`
-	Confirm bool   `json:"confirm,omitempty" jsonschema:"Must be true to actually send. Leave false or unset to preview what would be sent without sending it"`
+	ChatJID         string `json:"chat_jid" jsonschema:"The chat to send to. Get it from list_chats or search_contacts"`
+	Text            string `json:"text" jsonschema:"The message to send"`
+	QuotedMessageID string `json:"quoted_message_id,omitempty" jsonschema:"Optional. ID of a message in the same chat to send a quoted reply to"`
+	Confirm         bool   `json:"confirm,omitempty" jsonschema:"Must be true to actually send. Leave false or unset to preview what would be sent without sending it"`
 }
 
 type sendMessageOut struct {
-	Sent      bool   `json:"sent"`
-	ChatJID   string `json:"chat_jid"`
-	Preview   string `json:"preview"`
-	MessageID string `json:"message_id,omitempty"`
-	Note      string `json:"note"`
+	Sent            bool   `json:"sent"`
+	ChatJID         string `json:"chat_jid"`
+	Preview         string `json:"preview"`
+	MessageID       string `json:"message_id,omitempty"`
+	QuotedMessageID string `json:"quoted_message_id,omitempty"`
+	Note            string `json:"note"`
 }
 
 func registerSendMessage(s *mcp.Server, d Deps) {
@@ -283,23 +286,42 @@ func registerSendMessage(s *mcp.Server, d Deps) {
 			return nil, sendMessageOut{}, err
 		}
 
+		quotedID := strings.TrimSpace(in.QuotedMessageID)
+		if quotedID != "" && d.Store != nil {
+			if _, err := d.Store.GetMessage(ctx, in.ChatJID, quotedID); err != nil {
+				return nil, sendMessageOut{}, fmt.Errorf("quoted message lookup failed: %w", err)
+			}
+		}
+
 		// The dry run is the default. Nothing leaves the machine until the
 		// caller has seen the preview and asked again with confirm.
 		if !in.Confirm {
+			note := "Nothing was sent. This is a preview. Call again with confirm set to true to send it."
+			if quotedID != "" {
+				note = fmt.Sprintf("Nothing was sent. This is a preview (replying to %s). Call again with confirm set to true to send it.", quotedID)
+			}
 			return nil, sendMessageOut{
-				Sent: false, ChatJID: in.ChatJID, Preview: in.Text,
-				Note: "Nothing was sent. This is a preview. Call again with confirm set to true to send it.",
+				Sent: false, ChatJID: in.ChatJID, Preview: in.Text, QuotedMessageID: quotedID,
+				Note: note,
 			}, nil
 		}
 
-		id, err := d.Client.SendText(ctx, in.ChatJID, in.Text)
+		var (
+			id  string
+			err error
+		)
+		if quotedID != "" {
+			id, err = d.Client.SendReply(ctx, in.ChatJID, in.Text, quotedID)
+		} else {
+			id, err = d.Client.SendText(ctx, in.ChatJID, in.Text)
+		}
 		d.Guard.RecordSend(in.ChatJID, in.Text, err)
 		if err != nil {
 			return nil, sendMessageOut{}, fmt.Errorf("send failed: %w", err)
 		}
 
 		return nil, sendMessageOut{
-			Sent: true, ChatJID: in.ChatJID, Preview: in.Text, MessageID: id,
+			Sent: true, ChatJID: in.ChatJID, Preview: in.Text, MessageID: id, QuotedMessageID: quotedID,
 			Note: "Sent. This was recorded in the audit log.",
 		}, nil
 	})

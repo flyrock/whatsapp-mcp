@@ -346,6 +346,7 @@ func (c *Client) onMessage(ctx context.Context, evt *events.Message) {
 		Timestamp: evt.Info.Timestamp,
 		IsFromMe:  evt.Info.IsFromMe,
 		MsgType:   messageType(evt.Message),
+		QuotedID:  extractQuotedID(evt.Message),
 	}}
 	fillMedia(&sm, evt.Message)
 
@@ -654,6 +655,7 @@ func (c *Client) onHistorySync(ctx context.Context, evt *events.HistorySync) {
 				Timestamp: ts,
 				IsFromMe:  info.GetFromMe(),
 				MsgType:   messageType(wm.GetMessage()),
+				QuotedID:  extractQuotedID(wm.GetMessage()),
 			}}
 			fillMedia(&sm, wm.GetMessage())
 			_ = c.st.UpsertMessage(ctx, sm)
@@ -670,12 +672,31 @@ func (c *Client) onHistorySync(ctx context.Context, evt *events.HistorySync) {
 
 // SendText sends a plain text message and returns the new message ID.
 func (c *Client) SendText(ctx context.Context, chatJID, text string) (string, error) {
+	return c.SendReply(ctx, chatJID, text, "")
+}
+
+// SendReply sends a text message, optionally quoting an existing message in
+// the same chat when quotedMessageID is non-empty, and returns the new ID.
+func (c *Client) SendReply(ctx context.Context, chatJID, text, quotedMessageID string) (string, error) {
 	jid, err := types.ParseJID(chatJID)
 	if err != nil {
 		return "", fmt.Errorf("%q is not a valid chat id: %w", chatJID, err)
 	}
+	nonADChat := jid.ToNonAD()
+	ownSender := c.ownSenderJID(nonADChat)
 
-	resp, err := c.wm.SendMessage(ctx, jid, &waE2E.Message{Conversation: &text})
+	quotedMessageID = strings.TrimSpace(quotedMessageID)
+	var quoted *store.Message
+	if quotedMessageID != "" {
+		q, err := c.st.GetMessage(ctx, nonADChat.String(), quotedMessageID)
+		if err != nil {
+			return "", fmt.Errorf("quoted message lookup failed: %w", err)
+		}
+		quoted = &q
+	}
+
+	msg := buildTextMessage(text, quoted, ownSender, nonADChat)
+	resp, err := c.wm.SendMessage(ctx, jid, msg)
 	if err != nil {
 		return "", err
 	}
@@ -683,13 +704,109 @@ func (c *Client) SendText(ctx context.Context, chatJID, text string) (string, er
 	// Record our own message immediately so the next read reflects it.
 	_ = c.st.UpsertMessage(ctx, store.StoredMessage{Message: store.Message{
 		ID:        resp.ID,
-		ChatJID:   jid.ToNonAD().String(),
+		ChatJID:   nonADChat.String(),
+		SenderJID: ownSender,
 		Content:   text,
 		Timestamp: resp.Timestamp,
 		IsFromMe:  true,
 		MsgType:   "text",
+		QuotedID:  quotedMessageID,
 	}})
 	return resp.ID, nil
+}
+
+func (c *Client) ownSenderJID(chatJID types.JID) string {
+	if c.wm == nil || c.wm.Store == nil {
+		return ""
+	}
+	if chatJID.Server == types.HiddenUserServer {
+		if lid := c.wm.Store.GetLID(); !lid.IsEmpty() {
+			return lid.ToNonAD().String()
+		}
+	}
+	if jid := c.wm.Store.GetJID(); !jid.IsEmpty() {
+		return jid.ToNonAD().String()
+	}
+	return ""
+}
+
+func buildTextMessage(text string, quoted *store.Message, ownSenderJID string, chatJID types.JID) *waE2E.Message {
+	if quoted == nil {
+		return &waE2E.Message{Conversation: &text}
+	}
+
+	participant := quoted.SenderJID
+	if participant == "" {
+		if quoted.IsFromMe {
+			participant = ownSenderJID
+		} else if chatJID.Server != types.GroupServer {
+			participant = chatJID.ToNonAD().String()
+		}
+	}
+
+	ci := &waE2E.ContextInfo{
+		StanzaID:      proto.String(quoted.ID),
+		QuotedMessage: &waE2E.Message{Conversation: proto.String(quoted.Content)},
+	}
+	if participant != "" {
+		ci.Participant = proto.String(participant)
+	}
+	return &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text:        proto.String(text),
+			ContextInfo: ci,
+		},
+	}
+}
+
+func extractQuotedID(msg *waE2E.Message) string {
+	ci := extractContextInfo(msg)
+	if ci == nil {
+		return ""
+	}
+	return ci.GetStanzaID()
+}
+
+func extractContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
+	msg = unwrapMessage(msg)
+	if msg == nil {
+		return nil
+	}
+	switch {
+	case msg.GetExtendedTextMessage() != nil:
+		return msg.GetExtendedTextMessage().GetContextInfo()
+	case msg.GetImageMessage() != nil:
+		return msg.GetImageMessage().GetContextInfo()
+	case msg.GetVideoMessage() != nil:
+		return msg.GetVideoMessage().GetContextInfo()
+	case msg.GetAudioMessage() != nil:
+		return msg.GetAudioMessage().GetContextInfo()
+	case msg.GetDocumentMessage() != nil:
+		return msg.GetDocumentMessage().GetContextInfo()
+	case msg.GetStickerMessage() != nil:
+		return msg.GetStickerMessage().GetContextInfo()
+	case msg.GetContactMessage() != nil:
+		return msg.GetContactMessage().GetContextInfo()
+	case msg.GetContactsArrayMessage() != nil:
+		return msg.GetContactsArrayMessage().GetContextInfo()
+	case msg.GetLocationMessage() != nil:
+		return msg.GetLocationMessage().GetContextInfo()
+	case msg.GetLiveLocationMessage() != nil:
+		return msg.GetLiveLocationMessage().GetContextInfo()
+	case msg.GetPollCreationMessageV3() != nil:
+		return msg.GetPollCreationMessageV3().GetContextInfo()
+	case msg.GetPollCreationMessage() != nil:
+		return msg.GetPollCreationMessage().GetContextInfo()
+	case msg.GetListMessage() != nil:
+		return msg.GetListMessage().GetContextInfo()
+	case msg.GetListResponseMessage() != nil:
+		return msg.GetListResponseMessage().GetContextInfo()
+	case msg.GetOrderMessage() != nil:
+		return msg.GetOrderMessage().GetContextInfo()
+	case msg.GetProductMessage() != nil:
+		return msg.GetProductMessage().GetContextInfo()
+	}
+	return nil
 }
 
 // transcribeVoiceNote downloads a voice note, decrypts it and stores the text.
