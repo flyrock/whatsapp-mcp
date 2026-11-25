@@ -35,7 +35,8 @@ var Version = "dev"
 type WhatsApp interface {
 	Status() wa.Status
 	SendText(ctx context.Context, chatJID, text string) (string, error)
-	SendReply(ctx context.Context, chatJID, text, quotedMessageID string) (string, error)
+	SendReply(ctx context.Context, chatJID, text, quotedMessageID string, mentions []string) (string, error)
+	ListGroupParticipants(ctx context.Context, groupJID string) ([]wa.GroupMember, error)
 	DownloadMedia(ctx context.Context, chatJID, messageID string) (string, error)
 	SendVoiceBytes(ctx context.Context, chatJID string, ogg []byte) (string, error)
 	SendAudioBytes(ctx context.Context, chatJID string, data []byte, filename string) (string, error)
@@ -75,6 +76,7 @@ func New(d Deps) *mcp.Server {
 	registerSendFile(s, d)
 	registerSendVoiceNote(s, d)
 	registerSendAudio(s, d)
+	registerListGroupParticipants(s, d)
 
 	if d.Voice != nil {
 		registerSpeakMessage(s, d)
@@ -249,19 +251,21 @@ func registerSessionStatus(s *mcp.Server, d Deps) {
 // ── Writes ──
 
 type sendMessageIn struct {
-	ChatJID         string `json:"chat_jid" jsonschema:"The chat to send to. Get it from list_chats or search_contacts"`
-	Text            string `json:"text" jsonschema:"The message to send"`
-	QuotedMessageID string `json:"quoted_message_id,omitempty" jsonschema:"Optional. ID of a message in the same chat to send a quoted reply to"`
-	Confirm         bool   `json:"confirm,omitempty" jsonschema:"Must be true to actually send. Leave false or unset to preview what would be sent without sending it"`
+	ChatJID         string   `json:"chat_jid" jsonschema:"The chat to send to. Get it from list_chats or search_contacts"`
+	Text            string   `json:"text" jsonschema:"The message to send. To @mention someone, include @ followed by their number or LID user part (for example @15555550100) and pass their JID in mentions"`
+	QuotedMessageID string   `json:"quoted_message_id,omitempty" jsonschema:"Optional. ID of a message in the same chat to send a quoted reply to"`
+	Mentions        []string `json:"mentions,omitempty" jsonschema:"Optional. People to @mention, as JIDs (@s.whatsapp.net or @lid) or bare phone numbers. The text must already contain @ plus each person's user part; the text is not rewritten"`
+	Confirm         bool     `json:"confirm,omitempty" jsonschema:"Must be true to actually send. Leave false or unset to preview what would be sent without sending it"`
 }
 
 type sendMessageOut struct {
-	Sent            bool   `json:"sent"`
-	ChatJID         string `json:"chat_jid"`
-	Preview         string `json:"preview"`
-	MessageID       string `json:"message_id,omitempty"`
-	QuotedMessageID string `json:"quoted_message_id,omitempty"`
-	Note            string `json:"note"`
+	Sent            bool     `json:"sent"`
+	ChatJID         string   `json:"chat_jid"`
+	Preview         string   `json:"preview"`
+	MessageID       string   `json:"message_id,omitempty"`
+	QuotedMessageID string   `json:"quoted_message_id,omitempty"`
+	Mentions        []string `json:"mentions,omitempty"`
+	Note            string   `json:"note"`
 }
 
 func registerSendMessage(s *mcp.Server, d Deps) {
@@ -270,7 +274,8 @@ func registerSendMessage(s *mcp.Server, d Deps) {
 		Title: "Send a message",
 		Description: "Send a WhatsApp message. This writes to a real conversation and cannot be undone. " +
 			"It refuses unless the server was started with --allow-send, and it only sends when confirm is true, " +
-			"so calling it without confirm shows you exactly what would be sent first.",
+			"so calling it without confirm shows you exactly what would be sent first. " +
+			"Optional mentions notify people when the text already contains @ plus their user part.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:    false,
 			DestructiveHint: boolPtr(true),
@@ -293,25 +298,34 @@ func registerSendMessage(s *mcp.Server, d Deps) {
 			}
 		}
 
+		mentions, err := wa.NormalizeMentions(in.Mentions)
+		if err != nil {
+			return nil, sendMessageOut{}, err
+		}
+		if err := wa.ValidateMentionText(in.Text, mentions); err != nil {
+			return nil, sendMessageOut{}, err
+		}
+
 		// The dry run is the default. Nothing leaves the machine until the
 		// caller has seen the preview and asked again with confirm.
 		if !in.Confirm {
 			note := "Nothing was sent. This is a preview. Call again with confirm set to true to send it."
-			if quotedID != "" {
+			if quotedID != "" && len(mentions) > 0 {
+				note = fmt.Sprintf("Nothing was sent. This is a preview (replying to %s, mentioning %s). Call again with confirm set to true to send it.", quotedID, strings.Join(mentions, ", "))
+			} else if quotedID != "" {
 				note = fmt.Sprintf("Nothing was sent. This is a preview (replying to %s). Call again with confirm set to true to send it.", quotedID)
+			} else if len(mentions) > 0 {
+				note = fmt.Sprintf("Nothing was sent. This is a preview (mentioning %s). Call again with confirm set to true to send it.", strings.Join(mentions, ", "))
 			}
 			return nil, sendMessageOut{
-				Sent: false, ChatJID: in.ChatJID, Preview: in.Text, QuotedMessageID: quotedID,
+				Sent: false, ChatJID: in.ChatJID, Preview: in.Text, QuotedMessageID: quotedID, Mentions: mentions,
 				Note: note,
 			}, nil
 		}
 
-		var (
-			id  string
-			err error
-		)
-		if quotedID != "" {
-			id, err = d.Client.SendReply(ctx, in.ChatJID, in.Text, quotedID)
+		var id string
+		if quotedID != "" || len(mentions) > 0 {
+			id, err = d.Client.SendReply(ctx, in.ChatJID, in.Text, quotedID, mentions)
 		} else {
 			id, err = d.Client.SendText(ctx, in.ChatJID, in.Text)
 		}
@@ -321,7 +335,7 @@ func registerSendMessage(s *mcp.Server, d Deps) {
 		}
 
 		return nil, sendMessageOut{
-			Sent: true, ChatJID: in.ChatJID, Preview: in.Text, MessageID: id, QuotedMessageID: quotedID,
+			Sent: true, ChatJID: in.ChatJID, Preview: in.Text, MessageID: id, QuotedMessageID: quotedID, Mentions: mentions,
 			Note: "Sent. This was recorded in the audit log.",
 		}, nil
 	})
@@ -593,4 +607,37 @@ func isOggOpus(b []byte) bool {
 	// The OpusHead magic sits in the first page, after the Ogg header and its
 	// segment table.
 	return strings.Contains(string(b[:min(len(b), 128)]), "OpusHead")
+}
+
+type listGroupParticipantsIn struct {
+	ChatJID string `json:"chat_jid" jsonschema:"The group chat id (ends in @g.us)"`
+}
+
+type listGroupParticipantsOut struct {
+	ChatJID      string           `json:"chat_jid"`
+	Participants []wa.GroupMember `json:"participants"`
+	Count        int              `json:"count"`
+	Note         string           `json:"note,omitempty"`
+}
+
+func registerListGroupParticipants(s *mcp.Server, d Deps) {
+	mcp.AddTool(s, &mcp.Tool{
+		Name:  "list_group_participants",
+		Title: "List group participants",
+		Description: "List the members of a WhatsApp group with the JIDs (phone and LID) needed to @mention them. " +
+			"Use mention_token in the message text and pass jid (or lid / phone_jid) in send_message mentions.",
+		Annotations: readOnly,
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listGroupParticipantsIn) (*mcp.CallToolResult, listGroupParticipantsOut, error) {
+		if in.ChatJID == "" {
+			return nil, listGroupParticipantsOut{}, fmt.Errorf("chat_jid is required")
+		}
+		members, err := d.Client.ListGroupParticipants(ctx, in.ChatJID)
+		if err != nil {
+			return nil, listGroupParticipantsOut{}, err
+		}
+		return nil, listGroupParticipantsOut{
+			ChatJID: in.ChatJID, Participants: members, Count: len(members),
+			Note: "To mention someone, put their mention_token in the message text and pass their jid in send_message mentions. The text is not rewritten for you.",
+		}, nil
+	})
 }

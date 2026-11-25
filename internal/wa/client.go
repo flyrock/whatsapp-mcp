@@ -672,18 +672,26 @@ func (c *Client) onHistorySync(ctx context.Context, evt *events.HistorySync) {
 
 // SendText sends a plain text message and returns the new message ID.
 func (c *Client) SendText(ctx context.Context, chatJID, text string) (string, error) {
-	return c.SendReply(ctx, chatJID, text, "")
+	return c.SendReply(ctx, chatJID, text, "", nil)
 }
 
 // SendReply sends a text message, optionally quoting an existing message in
-// the same chat when quotedMessageID is non-empty, and returns the new ID.
-func (c *Client) SendReply(ctx context.Context, chatJID, text, quotedMessageID string) (string, error) {
+// the same chat and/or attaching @mentions, and returns the new ID.
+func (c *Client) SendReply(ctx context.Context, chatJID, text, quotedMessageID string, mentions []string) (string, error) {
 	jid, err := types.ParseJID(chatJID)
 	if err != nil {
 		return "", fmt.Errorf("%q is not a valid chat id: %w", chatJID, err)
 	}
 	nonADChat := jid.ToNonAD()
 	ownSender := c.ownSenderJID(nonADChat)
+
+	mentions, err = NormalizeMentions(mentions)
+	if err != nil {
+		return "", err
+	}
+	if err := ValidateMentionText(text, mentions); err != nil {
+		return "", err
+	}
 
 	quotedMessageID = strings.TrimSpace(quotedMessageID)
 	var quoted *store.Message
@@ -695,7 +703,7 @@ func (c *Client) SendReply(ctx context.Context, chatJID, text, quotedMessageID s
 		quoted = &q
 	}
 
-	msg := buildTextMessage(text, quoted, ownSender, nonADChat)
+	msg := buildTextMessage(text, quoted, ownSender, nonADChat, mentions)
 	resp, err := c.wm.SendMessage(ctx, jid, msg)
 	if err != nil {
 		return "", err
@@ -730,26 +738,29 @@ func (c *Client) ownSenderJID(chatJID types.JID) string {
 	return ""
 }
 
-func buildTextMessage(text string, quoted *store.Message, ownSenderJID string, chatJID types.JID) *waE2E.Message {
-	if quoted == nil {
+func buildTextMessage(text string, quoted *store.Message, ownSenderJID string, chatJID types.JID, mentions []string) *waE2E.Message {
+	if quoted == nil && len(mentions) == 0 {
 		return &waE2E.Message{Conversation: &text}
 	}
 
-	participant := quoted.SenderJID
-	if participant == "" {
-		if quoted.IsFromMe {
-			participant = ownSenderJID
-		} else if chatJID.Server != types.GroupServer {
-			participant = chatJID.ToNonAD().String()
+	ci := &waE2E.ContextInfo{}
+	if quoted != nil {
+		participant := quoted.SenderJID
+		if participant == "" {
+			if quoted.IsFromMe {
+				participant = ownSenderJID
+			} else if chatJID.Server != types.GroupServer {
+				participant = chatJID.ToNonAD().String()
+			}
+		}
+		ci.StanzaID = proto.String(quoted.ID)
+		ci.QuotedMessage = &waE2E.Message{Conversation: proto.String(quoted.Content)}
+		if participant != "" {
+			ci.Participant = proto.String(participant)
 		}
 	}
-
-	ci := &waE2E.ContextInfo{
-		StanzaID:      proto.String(quoted.ID),
-		QuotedMessage: &waE2E.Message{Conversation: proto.String(quoted.Content)},
-	}
-	if participant != "" {
-		ci.Participant = proto.String(participant)
+	if len(mentions) > 0 {
+		ci.MentionedJID = mentions
 	}
 	return &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
@@ -1006,4 +1017,50 @@ func mediaDirectPath(msg *waE2E.Message) string {
 		return msg.GetDocumentMessage().GetDirectPath()
 	}
 	return ""
+}
+
+// GroupMember is one participant of a WhatsApp group, with the JIDs needed
+// to @mention them.
+type GroupMember struct {
+	JID          string `json:"jid"`
+	PhoneJID     string `json:"phone_jid,omitempty"`
+	LID          string `json:"lid,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
+	IsAdmin      bool   `json:"is_admin"`
+	IsSuperAdmin bool   `json:"is_super_admin"`
+	MentionToken string `json:"mention_token"`
+}
+
+// ListGroupParticipants returns the members of a group and the tokens to use
+// in send_message mentions.
+func (c *Client) ListGroupParticipants(ctx context.Context, groupJID string) ([]GroupMember, error) {
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return nil, fmt.Errorf("%q is not a valid group id: %w", groupJID, err)
+	}
+	if jid.Server != types.GroupServer {
+		return nil, fmt.Errorf("%q is not a group chat", groupJID)
+	}
+	info, err := c.wm.GetGroupInfo(ctx, jid)
+	if err != nil {
+		return nil, fmt.Errorf("could not list group participants: %w", err)
+	}
+	out := make([]GroupMember, 0, len(info.Participants))
+	for _, p := range info.Participants {
+		m := GroupMember{
+			JID:          p.JID.ToNonAD().String(),
+			IsAdmin:      p.IsAdmin,
+			IsSuperAdmin: p.IsSuperAdmin,
+			DisplayName:  p.DisplayName,
+		}
+		if !p.PhoneNumber.IsEmpty() {
+			m.PhoneJID = p.PhoneNumber.ToNonAD().String()
+		}
+		if !p.LID.IsEmpty() {
+			m.LID = p.LID.ToNonAD().String()
+		}
+		m.MentionToken = MentionToken(m.JID)
+		out = append(out, m)
+	}
+	return out, nil
 }

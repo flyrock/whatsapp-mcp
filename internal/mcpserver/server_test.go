@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,9 +29,23 @@ func (f *fakeWA) SendText(_ context.Context, chatJID, text string) (string, erro
 	return "MSGID1", nil
 }
 
-func (f *fakeWA) SendReply(_ context.Context, chatJID, text, quotedMessageID string) (string, error) {
-	f.sent = append(f.sent, chatJID+" [reply:"+quotedMessageID+"]: "+text)
+func (f *fakeWA) SendReply(_ context.Context, chatJID, text, quotedMessageID string, mentions []string) (string, error) {
+	rec := chatJID + " [reply:" + quotedMessageID + "]: " + text
+	if len(mentions) > 0 {
+		rec += " mentions=" + strings.Join(mentions, ",")
+	}
+	f.sent = append(f.sent, rec)
 	return "MSGID_REPLY", nil
+}
+
+func (f *fakeWA) ListGroupParticipants(_ context.Context, groupJID string) ([]wa.GroupMember, error) {
+	if !strings.HasSuffix(groupJID, "@g.us") {
+		return nil, fmt.Errorf("%q is not a group chat", groupJID)
+	}
+	return []wa.GroupMember{{
+		JID: "111000111000111@lid", LID: "111000111000111@lid",
+		PhoneJID: "15555550100@s.whatsapp.net", MentionToken: "@111000111000111",
+	}}, nil
 }
 
 func (f *fakeWA) DownloadMedia(_ context.Context, chatJID, messageID string) (string, error) {
@@ -127,7 +142,7 @@ func TestToolsAreAdvertisedWithAnnotations(t *testing.T) {
 	for _, want := range []string{
 		"search_messages", "list_messages", "list_chats",
 		"search_contacts", "session_status", "send_message",
-		"download_media", "send_file", "send_voice_note",
+		"download_media", "send_file", "send_voice_note", "list_group_participants",
 	} {
 		if byName[want] == nil {
 			t.Errorf("tool %s is not advertised", want)
@@ -380,5 +395,65 @@ func TestSendQuotedReplyGuardsAndPreview(t *testing.T) {
 	}
 	if len(fake.sent) != 1 || fake.sent[0] != "a@s.whatsapp.net [reply:Q1]: reply" {
 		t.Fatalf("unexpected sent record: %v", fake.sent)
+	}
+}
+
+func TestSendMentionsGuardsAndPreview(t *testing.T) {
+	csReadOnly, fakeRO, _ := session(t, false)
+	res := call(t, csReadOnly, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net",
+		"text":     "hi @15555550100",
+		"mentions": []string{"15555550100"},
+		"confirm":  true,
+	})
+	if !res.IsError || len(fakeRO.sent) != 0 {
+		t.Fatal("mentions must be refused when --allow-send is off")
+	}
+
+	cs, fake, _ := session(t, true)
+
+	// Text missing the @token is refused and the original text is not rewritten.
+	res = call(t, cs, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net",
+		"text":     "hello there",
+		"mentions": []string{"15555550100"},
+		"confirm":  true,
+	})
+	if !res.IsError || len(fake.sent) != 0 {
+		t.Fatal("text without @user must error without sending")
+	}
+
+	res = call(t, cs, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net",
+		"text":     "hi @15555550100",
+		"mentions": []string{"15555550100"},
+	})
+	if res.IsError || len(fake.sent) != 0 {
+		t.Fatal("preview of a mention should not send")
+	}
+
+	res = call(t, cs, "send_message", map[string]any{
+		"chat_jid": "a@s.whatsapp.net",
+		"text":     "hi @15555550100",
+		"mentions": []string{"15555550100"},
+		"confirm":  true,
+	})
+	if res.IsError {
+		t.Fatal("confirmed mention should succeed")
+	}
+	if len(fake.sent) != 1 || !strings.Contains(fake.sent[0], "mentions=15555550100@s.whatsapp.net") {
+		t.Fatalf("unexpected sent record: %v", fake.sent)
+	}
+}
+
+func TestListGroupParticipantsIsReadOnly(t *testing.T) {
+	cs, _, _ := session(t, false)
+	res := call(t, cs, "list_group_participants", map[string]any{"chat_jid": "120363000000000001@g.us"})
+	if res.IsError {
+		t.Fatal("listing participants should work without --allow-send")
+	}
+	res = call(t, cs, "list_group_participants", map[string]any{"chat_jid": "a@s.whatsapp.net"})
+	if !res.IsError {
+		t.Fatal("a direct chat is not a group")
 	}
 }
